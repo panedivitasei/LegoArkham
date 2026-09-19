@@ -16,6 +16,15 @@ namespace {
 
 // LEGOBatman.exe addresses. The exe has no ASLR, so these are absolute.
 constexpr uintptr_t kPlayer1Ptr = 0xAB3980;
+// Apply custom handling in vehicle levels only, which levels.txt flags.
+// A vehicle picked up in any other level keeps the game's handling.
+constexpr uintptr_t kLevelPtr = 0x960894;       // the level: its name at +0, its levels.txt index at +292
+constexpr int kLevelIndexOffset = 292;
+constexpr uintptr_t kLevelTablePtr = 0xACA554;  // the levels.txt entries, 188 bytes each
+constexpr uintptr_t kLevelCountPtr = 0xACA560;
+constexpr int kLevelEntrySize = 188;
+constexpr int kLevelFlagsOffset = 124;
+constexpr DWORD kVehicleLevel = 0x1;
 constexpr uintptr_t kMenuState = 0x60CEE0;  // -1 while no menu is open
 constexpr uintptr_t kFrameTime = 0xA95FE0;
 constexpr uintptr_t kGameCameraPtr = 0x95F624;
@@ -116,6 +125,29 @@ int Definition(int object) {
   return instance ? At<int>(instance + 36) : 0;
 }
 
+bool VehicleLevel() {
+  int level = At<int>(kLevelPtr);
+  int table = At<int>(kLevelTablePtr), count = At<int>(kLevelCountPtr);
+  if (!level || !table) return false;
+  int index = Field<int>(level, kLevelIndexOffset);
+  if (index < 0 || index >= count) return false;
+  return (Field<DWORD>(table + kLevelEntrySize * index, kLevelFlagsOffset) & kVehicleLevel) != 0;
+}
+
+// The two animation patches only matter while the mod drives, so they go in and out with the level.
+bool animPatched;
+void PatchAnimation(bool on) {
+  if (on == animPatched) return;
+  animPatched = on;
+  if (on) {
+    hook::PatchBytes(reinterpret_cast<void*>(kWheelClampJump), {0x75, 0x2E}, {0xEB, 0x2E});
+    hook::PatchBytes(reinterpret_cast<void*>(kReversibleFlagJump), {0x74, 0x15}, {0x90, 0x90});
+  } else {
+    hook::PatchBytes(reinterpret_cast<void*>(kWheelClampJump), {0xEB, 0x2E}, {0x75, 0x2E});
+    hook::PatchBytes(reinterpret_cast<void*>(kReversibleFlagJump), {0x90, 0x90}, {0x74, 0x15});
+  }
+}
+
 // The vehicle player 1 is driving, or 0: a vehicle they climbed into, or, in the chase levels,
 // their own character, which is the vehicle itself.
 bool IsVehicle(int definition) {
@@ -125,7 +157,7 @@ bool IsVehicle(int definition) {
 
 int Driven() {
   int player = At<int>(kPlayer1Ptr);
-  if (!player) return 0;
+  if (!player || !VehicleLevel()) return 0;
   if (Field<uint8_t>(player, kContextOffset) == kDrivingContext) return Field<int>(player, kRiderVehicleOffset);
   return IsVehicle(Definition(player)) ? player : 0;
 }
@@ -279,6 +311,7 @@ void Update() {
   }
   QuietStreaks();
   RetypeThrusters();
+  PatchAnimation(VehicleLevel());
   int vehicle = Driven();
   int definition = vehicle ? Definition(vehicle) : 0;
   float view;
@@ -343,8 +376,6 @@ void SteerToView(BYTE* axes[8]) {
 void Install(const std::string& ini) {
   iniPath = ini;
   Reload();
-  hook::PatchBytes(reinterpret_cast<void*>(kWheelClampJump), {0x75, 0x2E}, {0xEB, 0x2E});
-  hook::PatchBytes(reinterpret_cast<void*>(kReversibleFlagJump), {0x74, 0x15}, {0x90, 0x90});
   frame::OnLevelUpdate(Update);
 }
 
